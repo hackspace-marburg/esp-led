@@ -10,9 +10,22 @@
 #include <NeoPixelBus.h>
 #include <NeoPixelAnimator.h>
 
-const uint16_t PixelCount = 16; // make sure to set this to the number of pixels in your strip
+#include <WiFiClient.h>
+#include <WiFiClientSecure.h>
+#include <WiFiServer.h>
+#include <WiFiUdp.h>
+
+#include <ArduinoJson.h>
+
+#include <ESP8266WiFi.h>
+
+
+const char* wlan_ssid = "";
+const char* wlan_password = "";
+
+const uint16_t PixelCount = 3*49; // make sure to set this to the number of pixels in your strip
 const uint8_t PixelPin = 2;  // make sure to set this to the correct pin, ignored for Esp8266
-const RgbColor CylonEyeColor(HtmlColor(0x7f0000));
+RgbColor CylonEyeColor = HtmlColor(0x7f0000);
 
 NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod> strip(PixelCount, PixelPin);
 // for esp8266 omit the pin
@@ -22,6 +35,7 @@ NeoPixelAnimator animations(2); // only ever need 2 animations
 
 uint16_t lastPixel = 0; // track the eye position
 int8_t moveDir = 1; // track the direction of movement
+int mil;  // millisecond timer for scheduling the api query
 
 // uncomment one of the lines below to see the effects of
 // changing the ease function on the movement animation
@@ -85,8 +99,7 @@ void MoveAnimUpdate(const AnimationParam& param)
 
     lastPixel = nextPixel;
 
-    if (param.state == AnimationState_Completed)
-    {
+    if (param.state == AnimationState_Completed){
         // reverse direction of movement
         moveDir *= -1;
 
@@ -95,8 +108,7 @@ void MoveAnimUpdate(const AnimationParam& param)
     }
 }
 
-void SetupAnimations()
-{
+void SetupAnimations() {
     // fade all pixels providing a tail that is longer the faster
     // the pixel moves.
     animations.StartAnimation(0, 5, FadeAnimUpdate);
@@ -105,19 +117,104 @@ void SetupAnimations()
     animations.StartAnimation(1, 2000, MoveAnimUpdate);
 }
 
-void setup()
-{
+void setup() {
+    // fire up wifi and query space api
+    Serial.begin(115200);
+    
     strip.Begin();
     strip.Show();
 
+    Serial.println();
+    Serial.println("Running...");
+    
+    WiFi.begin(wlan_ssid, wlan_password);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+    
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+
     SetupAnimations();
+
+    if(getSpaceApi()){
+      CylonEyeColor = HtmlColor(0x669900);
+    }else{
+      CylonEyeColor = HtmlColor(0xCC0033);
+    }
+
+    //WiFi.forceSleepBegin();
 }
 
-void loop()
-{
+void loop(){
     // this is all that is needed to keep it running
     // and avoiding using delay() is always a good thing for
     // any timing related routines
-    animations.UpdateAnimations();
+
+    // query the server every minute
+    if(millis() - mil >= 1000 * 60){
+      //WiFi.forceSleepWake();
+      if(getSpaceApi()){
+        CylonEyeColor = HtmlColor(0x669900);
+      }else{
+        CylonEyeColor = HtmlColor(0xCC0033);
+      }
+      //WiFi.forceSleepBegin();
+      
+      // query every minute
+      mil = millis();
+    }
+    if (millis() - mil < 0) {
+      // should overflow after 50 d
+      mil = millis();
+    }
+    
+    animations.UpdateAnimations();    
     strip.Show();
 }
+
+bool getSpaceApi(){
+  StaticJsonBuffer<2000> jsonBuffer;
+  
+  // set up client
+  WiFiClient client;
+  const int httpPort = 80;
+  const char* url = "hsmr.cc";
+  const char* file = "/spaceapi.json";
+
+  //connect to api
+  if (!client.connect(url, httpPort)) {
+    Serial.println("connection failed");
+    return false;
+  }
+
+  //download status
+  client.print(String("GET ") + file + " HTTP/1.1\r\n" +
+           "Host: " + url + "\r\n" + 
+           "Connection: close\r\n\r\n");
+
+  // try until it exceeds 1 second
+  int started = millis();
+  while(!client.available()){
+    delay(1);
+    if(millis() - started > 1000){
+      return false;
+    }
+  }
+  
+  // read the returned strings
+  while(client.available()){
+    String line = client.readStringUntil('\r');
+    Serial.println(line);
+    
+    JsonObject& root = jsonBuffer.parseObject(line);
+    if (!root.success()){
+      Serial.println("parseObject() failed");
+    }else{
+      Serial.println(root["state"]["open"].asString());
+      return root["state"]["open"] == true;
+    }
+  }
+}
+
